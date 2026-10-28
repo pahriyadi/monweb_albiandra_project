@@ -3,8 +3,8 @@ declare(strict_types=1);
 
 /**
  * MONWEB By AP - ALBIANDRA PROJECT
- * Standalone Remote Agent (monweb-agent.php)
- * Upload file ini ke root folder website target (PHP Native, CodeIgniter 3/4, atau JS).
+ * Standalone Remote Agent v2.0 (monweb-agent.php)
+ * Upload file ini ke root folder website target (PHP Native, CodeIgniter 3/4, Laravel, atau JS).
  */
 
 header('Content-Type: application/json; charset=utf-8');
@@ -96,13 +96,13 @@ function runCommand(string $cmd, string $cwd): array {
 function collectGitInfo(string $cwd): array {
     if (!is_dir($cwd . DIRECTORY_SEPARATOR . '.git')) {
         return [
-            'initialized' => false,
-            'branch'      => '-',
-            'commit_hash' => '-',
-            'commit_msg'  => 'Folder ini belum memiliki repositori .git',
-            'commit_time' => '-',
-            'dirty_count' => 0,
-            'status_raw'  => '',
+            'initialized'    => false,
+            'branch'         => '-',
+            'commit_hash'    => '-',
+            'commit_msg'     => 'Folder ini belum memiliki repositori .git',
+            'commit_time'    => '-',
+            'dirty_count'    => 0,
+            'status_raw'     => '',
             'recent_commits' => [],
         ];
     }
@@ -173,7 +173,6 @@ function collectDiskInfo(string $cwd): array {
             }
         }
     } catch (Throwable $e) {
-        // Lewati folder yang terkunci permission
     }
 
     return [
@@ -245,6 +244,92 @@ function tailFileLines(string $filePath, int $lines = 50): array {
     return array_slice($all, -$lines);
 }
 
+function cleanCacheAndSessions(string $cwd): array {
+    $dirs = [
+        $cwd . '/application/cache',
+        $cwd . '/writable/cache',
+        $cwd . '/writable/session',
+        $cwd . '/writable/debugbar',
+        $cwd . '/storage/framework/cache/data',
+        $cwd . '/storage/framework/views',
+    ];
+    $deletedFiles = 0;
+    $freedBytes   = 0;
+
+    foreach ($dirs as $d) {
+        if (!is_dir($d)) {
+            continue;
+        }
+        try {
+            $it = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($d, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::CHILD_FIRST
+            );
+            foreach ($it as $f) {
+                $name = $f->getFilename();
+                if ($name === 'index.html' || $name === '.htaccess' || $name === '.gitignore') {
+                    continue;
+                }
+                if ($f->isFile() && is_writable($f->getPathname())) {
+                    $freedBytes += (int) $f->getSize();
+                    if (@unlink($f->getPathname())) {
+                        $deletedFiles++;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
+    return [
+        'deleted_files' => $deletedFiles,
+        'freed_mb'      => round($freedBytes / 1048576, 2),
+    ];
+}
+
+function createZipArchive(string $cwd): array {
+    if (!class_exists('ZipArchive')) {
+        return ['ok' => false, 'error' => 'Ekstensi ZipArchive tidak aktif di PHP server ini.'];
+    }
+    $backupName = 'backup_' . basename($cwd) . '_' . date('Ymd_His') . '.zip';
+    $backupPath = $cwd . '/' . $backupName;
+    $zip = new ZipArchive();
+    if ($zip->open($backupPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+        return ['ok' => false, 'error' => 'Gagal membuat file ZIP di folder target.'];
+    }
+
+    $count = 0;
+    try {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($cwd, FilesystemIterator::SKIP_DOTS)
+        );
+        foreach ($it as $file) {
+            if (!$file->isFile()) {
+                continue;
+            }
+            $real = $file->getRealPath();
+            $rel  = substr($real, strlen($cwd) + 1);
+            if (str_starts_with($rel, '.git') || str_ends_with($rel, '.zip') || str_ends_with($rel, '.sqlite')) {
+                continue;
+            }
+            $zip->addFile($real, $rel);
+            $count++;
+            if ($count >= 5000) {
+                break;
+            }
+        }
+    } catch (Throwable $e) {
+    }
+    $zip->close();
+
+    return [
+        'ok'         => true,
+        'file_name'  => $backupName,
+        'files_zipped' => $count,
+        'size_mb'    => is_file($backupPath) ? round(filesize($backupPath) / 1048576, 2) : 0,
+    ];
+}
+
 function recordVisitorHit(string $cwd): void {
     $file = $cwd . '/.monweb_traffic.json';
     $today = date('Y-m-d');
@@ -310,6 +395,65 @@ switch ($action) {
         ]);
         break;
 
+    case 'git_reset':
+        $branch = preg_replace('/[^a-zA-Z0-9._\/-]/', '', (string) ($payload['branch'] ?? 'main'));
+        $cmd = "git fetch --all 2>&1 && git reset --hard origin/{$branch} 2>&1";
+        $res = runCommand($cmd, $targetPath);
+        echo json_encode([
+            'ok'      => $res['exit_code'] === 0,
+            'command' => $cmd,
+            'output'  => trim($res['stdout'] . "\n" . $res['stderr']),
+            'git'     => collectGitInfo($targetPath),
+        ]);
+        break;
+
+    case 'git_log':
+        $cmd = 'git log -8 --oneline --decorate --graph 2>&1';
+        $res = runCommand($cmd, $targetPath);
+        echo json_encode([
+            'ok'      => $res['exit_code'] === 0,
+            'command' => $cmd,
+            'output'  => trim($res['stdout'] . "\n" . $res['stderr']),
+            'git'     => collectGitInfo($targetPath),
+        ]);
+        break;
+
+    case 'custom_cmd':
+        $customCmd = trim((string) ($payload['command'] ?? ''));
+        if ($customCmd === '') {
+            echo json_encode(['ok' => false, 'error' => 'Perintah tidak boleh kosong.']);
+            break;
+        }
+        $res = runCommand($customCmd . ' 2>&1', $targetPath);
+        echo json_encode([
+            'ok'      => $res['exit_code'] === 0,
+            'command' => $customCmd,
+            'output'  => trim($res['stdout'] . "\n" . $res['stderr']),
+        ]);
+        break;
+
+    case 'clean_cache':
+        $clean = cleanCacheAndSessions($targetPath);
+        echo json_encode([
+            'ok'      => true,
+            'command' => 'clean_cache_and_sessions',
+            'output'  => "Berhasil menghapus {$clean['deleted_files']} file cache/session ({$clean['freed_mb']} MB dibebaskan).",
+        ]);
+        break;
+
+    case 'backup_zip':
+        $zipRes = createZipArchive($targetPath);
+        if (!$zipRes['ok']) {
+            echo json_encode($zipRes);
+            break;
+        }
+        echo json_encode([
+            'ok'      => true,
+            'command' => 'backup_zip',
+            'output'  => "Arsip {$zipRes['file_name']} selesai dibuat ({$zipRes['files_zipped']} file, {$zipRes['size_mb']} MB).",
+        ]);
+        break;
+
     case 'clear_logs':
         $cleared = [];
         $candidates = [
@@ -344,4 +488,3 @@ switch ($action) {
         echo json_encode(['ok' => false, 'error' => 'Action tidak dikenali: ' . $action]);
         break;
 }
-

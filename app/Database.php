@@ -141,6 +141,8 @@ class Database {
             'wa_webhook_token'       => '',
             'last_daily_report_date' => '',
             'master_agent_secret'    => 'ap_monweb_' . substr(hash('sha256', __DIR__ . 'ALBIANDRA_PROJECT'), 0, 24),
+            'security_pin_enabled'   => '0',
+            'security_pin_code'      => '123456',
         ];
 
         $stmtCheck = $pdo->prepare('SELECT COUNT(*) FROM settings WHERE setting_key = :k');

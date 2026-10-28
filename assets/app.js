@@ -1,6 +1,6 @@
 /**
  * MONWEB By AP - ALBIANDRA PROJECT
- * Frontend Controller (Interactive Tabs, Git Execution, Modal Keyboard Trap, 08:00 AM Auto-Scheduler)
+ * Frontend Controller v2.0 (Auto-Discovery, Mass Git Pull, Remote Terminal Runner, Cache Cleaner, PIN Lock, 08:00 AM Scheduler)
  */
 
 (function () {
@@ -10,6 +10,7 @@
     const bannerText = document.getElementById('global-status-text');
     const btnCloseBanner = document.getElementById('btn-close-banner');
     const gitConsole = document.getElementById('git-console-box');
+    const autoConsole = document.getElementById('automation-console-box');
 
     function showBanner(msg, type) {
         if (!banner || !bannerText) return;
@@ -49,6 +50,7 @@
     const tabButtons = Array.from(document.querySelectorAll('.nav-tab[role="tab"]'));
     const tabPanels = {
         overview: document.getElementById('panel-overview'),
+        automation: document.getElementById('panel-automation'),
         errors: document.getElementById('panel-errors'),
         traffic: document.getElementById('panel-traffic'),
         schedule: document.getElementById('panel-schedule')
@@ -86,6 +88,43 @@
         });
     });
 
+    async function postApi(payload) {
+        const resp = await fetch('api.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) {
+            throw new Error(data.error || 'Terjadi kesalahan komunikasi dengan server.');
+        }
+        return data;
+    }
+
+    // PIN Unlock & Lock
+    const formUnlockPin = document.getElementById('form-unlock-pin');
+    if (formUnlockPin) {
+        formUnlockPin.addEventListener('submit', async function (e) {
+            e.preventDefault();
+            const pinInput = document.getElementById('unlock_pin_input');
+            try {
+                await postApi({ action: 'verify_pin', pin_code: pinInput ? pinInput.value : '' });
+                window.location.reload();
+            } catch (err) {
+                showBanner(err.message, 'error');
+            }
+        });
+    }
+
+    const btnLockConsole = document.getElementById('btn-lock-console');
+    if (btnLockConsole) {
+        btnLockConsole.addEventListener('click', async function () {
+            await postApi({ action: 'lock_session' });
+            window.location.reload();
+        });
+    }
+
+    // Modal Add Website
     const modalAdd = document.getElementById('modal-add-site');
     const btnOpenModal = document.getElementById('btn-open-add-modal');
     const btnEmptyAdd = document.getElementById('btn-empty-add-site');
@@ -127,19 +166,6 @@
         });
     }
 
-    async function postApi(payload) {
-        const resp = await fetch('api.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const data = await resp.json();
-        if (!resp.ok || !data.ok) {
-            throw new Error(data.error || 'Terjadi kesalahan komunikasi dengan server.');
-        }
-        return data;
-    }
-
     const formAddSite = document.getElementById('form-add-site');
     if (formAddSite) {
         formAddSite.addEventListener('submit', async function (e) {
@@ -163,30 +189,56 @@
         });
     }
 
-    const btnRegisterSelf = document.getElementById('btn-register-self');
-    if (btnRegisterSelf) {
-        btnRegisterSelf.addEventListener('click', async function () {
-            btnRegisterSelf.disabled = true;
-            showBanner('Mendaftarkan folder workspace MONWEB By AP untuk pengujian langsung...', '');
+    // Auto-Discover Local Hosting Directories
+    async function triggerAutoDiscover(btn) {
+        if (btn) btn.disabled = true;
+        showBanner('Memindai seluruh folder proyek dan subdomain di dalam public_html hosting Anda...', '');
+        try {
+            const res = await postApi({ action: 'auto_discover' });
+            const msg = res.count > 0
+                ? 'Berhasil menemukan dan mendaftarkan ' + res.count + ' website: ' + res.added.join(', ')
+                : 'Pemindaian selesai di ' + res.scanned_in + '. Semua website sudah terdaftar.';
+            showBanner(msg, 'success');
+            setTimeout(function () { window.location.reload(); }, 900);
+        } catch (err) {
+            showBanner(err.message, 'error');
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    const btnAutoDiscover = document.getElementById('btn-auto-discover');
+    const btnEmptyDiscover = document.getElementById('btn-empty-discover');
+    if (btnAutoDiscover) {
+        btnAutoDiscover.addEventListener('click', function () { triggerAutoDiscover(btnAutoDiscover); });
+    }
+    if (btnEmptyDiscover) {
+        btnEmptyDiscover.addEventListener('click', function () { triggerAutoDiscover(btnEmptyDiscover); });
+    }
+
+    // Mass Git Pull All Sites
+    const btnMassGitPull = document.getElementById('btn-mass-git-pull');
+    if (btnMassGitPull) {
+        btnMassGitPull.addEventListener('click', async function () {
+            btnMassGitPull.disabled = true;
+            showBanner('Menjalankan Git Pull secara serentak pada seluruh website yang terdaftar...', '');
+            if (gitConsole) {
+                gitConsole.textContent = 'Menjalankan Mass Git Pull pada seluruh website...';
+            }
             try {
-                await postApi({
-                    action: 'add_site',
-                    name: 'MONWEB By AP (baznassumbawa.id)',
-                    url: window.location.origin,
-                    stack_type: 'PHP Native',
-                    hosting_panel: 'hPanel Niagahoster',
-                    conn_mode: 'local',
-                    repo_path: (window.MONWEB_CONFIG && window.MONWEB_CONFIG.selfPath) ? window.MONWEB_CONFIG.selfPath : '',
-                    git_branch: 'main'
-                });
-                window.location.reload();
+                const res = await postApi({ action: 'mass_git_pull' });
+                if (gitConsole) {
+                    gitConsole.textContent = '[' + res.timestamp + '] MASS GIT PULL (' + res.succeeded + '/' + res.total + ' Sukses)\n\n' + res.output;
+                }
+                showBanner('Git Pull massal selesai (' + res.succeeded + ' dari ' + res.total + ' website sukses).', 'success');
             } catch (err) {
                 showBanner(err.message, 'error');
-                btnRegisterSelf.disabled = false;
+            } finally {
+                btnMassGitPull.disabled = false;
             }
         });
     }
 
+    // Sync All Sites
     const btnSyncAll = document.getElementById('btn-sync-all');
     if (btnSyncAll) {
         btnSyncAll.addEventListener('click', async function () {
@@ -203,6 +255,7 @@
         });
     }
 
+    // Per-Site Git Pull / Status / Clean Cache
     document.querySelectorAll('.js-git-action').forEach(function (btn) {
         btn.addEventListener('click', async function () {
             const id = parseInt(btn.getAttribute('data-id'), 10);
@@ -236,6 +289,63 @@
         });
     });
 
+    // Remote Command Runner Tab (Presets & Custom Shell)
+    const runnerSiteSelect = document.getElementById('runner_site_id');
+    const formRemoteRunner = document.getElementById('form-remote-runner');
+    const runnerCustomInput = document.getElementById('runner_custom_cmd');
+
+    async function runAutomationAction(gitType, customCmd) {
+        if (!runnerSiteSelect) return;
+        const siteId = parseInt(runnerSiteSelect.value, 10);
+        if (!siteId) return;
+
+        if (autoConsole) {
+            autoConsole.textContent = '[' + new Date().toLocaleTimeString('id-ID') + '] Mengeksekusi perintah pada website ID #' + siteId + '...';
+        }
+        showBanner('Mengeksekusi perintah otomasi...', '');
+
+        try {
+            const res = await postApi({
+                action: 'git_action',
+                id: siteId,
+                git_type: gitType,
+                custom_cmd: customCmd || ''
+            });
+            if (autoConsole) {
+                autoConsole.textContent = '[' + res.timestamp + '] $ ' + res.command + '\n\n' + res.output;
+            }
+            showBanner('Eksekusi selesai: ' + res.command, 'success');
+        } catch (err) {
+            if (autoConsole) {
+                autoConsole.textContent = '[ERROR] ' + err.message;
+            }
+            showBanner(err.message, 'error');
+        }
+    }
+
+    document.querySelectorAll('.js-preset-action').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            const gitType = btn.getAttribute('data-git');
+            if (gitType === 'git_reset' && !window.confirm('Git Force Reset akan menimpa perubahan file lokal yang belum di-commit agar sama persis dengan GitHub. Lanjutkan?')) {
+                return;
+            }
+            runAutomationAction(gitType, '');
+        });
+    });
+
+    if (formRemoteRunner) {
+        formRemoteRunner.addEventListener('submit', function (e) {
+            e.preventDefault();
+            const cmd = runnerCustomInput ? runnerCustomInput.value.trim() : '';
+            if (!cmd) {
+                showBanner('Masukkan perintah terminal yang ingin dijalankan.', 'error');
+                return;
+            }
+            runAutomationAction('custom_cmd', cmd);
+        });
+    }
+
+    // Per-Site Sync
     document.querySelectorAll('.js-sync-site').forEach(function (btn) {
         btn.addEventListener('click', async function () {
             const id = parseInt(btn.getAttribute('data-id'), 10);
@@ -252,6 +362,7 @@
         });
     });
 
+    // Per-Site Delete
     document.querySelectorAll('.js-delete-site').forEach(function (btn) {
         btn.addEventListener('click', async function () {
             const id = parseInt(btn.getAttribute('data-id'), 10);
@@ -270,6 +381,7 @@
         });
     });
 
+    // Clear Filtered Error Logs
     const btnClearLogs = document.getElementById('btn-clear-filtered-logs');
     if (btnClearLogs) {
         btnClearLogs.addEventListener('click', async function () {
@@ -287,6 +399,7 @@
         });
     }
 
+    // Save Settings
     const formWa = document.getElementById('form-wa-settings');
     if (formWa) {
         formWa.addEventListener('submit', async function (e) {
@@ -295,7 +408,7 @@
             const payload = {};
             fd.forEach(function (v, k) { payload[k] = v; });
 
-            showBanner('Menyimpan pengaturan jadwal WhatsApp 08:00...', '');
+            showBanner('Menyimpan pengaturan jadwal WhatsApp 08:00 & Keamanan...', '');
             try {
                 const res = await postApi(payload);
                 showBanner(res.message, 'success');
@@ -305,6 +418,7 @@
         });
     }
 
+    // Trigger WhatsApp Report Now
     const btnTriggerWa = document.getElementById('btn-trigger-wa-now');
     const waPreviewBox = document.getElementById('wa-report-preview');
     const linkWaDirect = document.getElementById('link-wa-direct');
@@ -353,4 +467,3 @@
         }
     }, 25000);
 })();
-

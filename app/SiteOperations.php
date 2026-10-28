@@ -5,6 +5,7 @@ namespace MonWeb;
 
 use PDO;
 use Throwable;
+use ZipArchive;
 
 class SiteOperations {
     private PDO $db;
@@ -56,8 +57,8 @@ class SiteOperations {
             ':name'          => trim((string) ($data['name'] ?? 'Website Tanpa Nama')),
             ':url'           => $url,
             ':stack_type'    => trim((string) ($data['stack_type'] ?? 'PHP Native')),
-            ':hosting_panel' => trim((string) ($data['hosting_panel'] ?? 'hPanel Niagahoster')),
-            ':conn_mode'     => trim((string) ($data['conn_mode'] ?? 'agent')),
+            ':hosting_panel' => trim((string) ($data['hosting_panel'] ?? 'cPanel Unlimited')),
+            ':conn_mode'     => trim((string) ($data['conn_mode'] ?? 'local')),
             ':agent_url'     => $agentUrl,
             ':agent_secret'  => $secret,
             ':ssh_host'      => trim((string) ($data['ssh_host'] ?? '')),
@@ -78,6 +79,114 @@ class SiteOperations {
         $this->db->prepare('DELETE FROM error_logs WHERE website_id = :id')->execute([':id' => $id]);
         $this->db->prepare('DELETE FROM deploy_logs WHERE website_id = :id')->execute([':id' => $id]);
         $this->db->prepare('DELETE FROM uptime_checks WHERE website_id = :id')->execute([':id' => $id]);
+    }
+
+    public function discoverLocalHostingDirectories(): array {
+        $parentDir = dirname(__DIR__);
+        if (basename($parentDir) !== 'public_html' && is_dir(dirname($parentDir))) {
+            $parentDir = dirname($parentDir);
+        }
+
+        $existingPaths = [];
+        $existingUrls  = [];
+        foreach ($this->getAllSites() as $s) {
+            if (!empty($s['repo_path'])) {
+                $existingPaths[rtrim(str_replace('\\', '/', $s['repo_path']), '/')] = true;
+            }
+            if (!empty($s['url'])) {
+                $existingUrls[strtolower(rtrim($s['url'], '/'))] = true;
+            }
+        }
+
+        $discovered = [];
+        $candidates = [];
+
+        if (basename($parentDir) === 'public_html') {
+            $candidates[] = [
+                'name'      => 'Domain Utama (baznassumbawa.id)',
+                'url'       => 'https://baznassumbawa.id',
+                'repo_path' => $parentDir,
+            ];
+        }
+
+        $items = @scandir($parentDir) ?: [];
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..' || $item === 'cgi-bin' || str_starts_with($item, '.')) {
+                continue;
+            }
+            $fullPath = $parentDir . '/' . $item;
+            if (!is_dir($fullPath)) {
+                continue;
+            }
+
+            $hasIndex = is_file($fullPath . '/index.php')
+                || is_file($fullPath . '/index.html')
+                || is_dir($fullPath . '/.git')
+                || is_dir($fullPath . '/application')
+                || is_dir($fullPath . '/app');
+
+            if (!$hasIndex) {
+                continue;
+            }
+
+            if (str_contains($item, '.')) {
+                $url = 'https://' . $item;
+                $label = 'Subdomain: ' . $item;
+            } else {
+                $url = 'https://baznassumbawa.id/' . $item;
+                $label = 'Aplikasi: ' . $item;
+            }
+
+            $candidates[] = [
+                'name'      => $label,
+                'url'       => $url,
+                'repo_path' => $fullPath,
+            ];
+        }
+
+        foreach ($candidates as $cand) {
+            $normPath = rtrim(str_replace('\\', '/', $cand['repo_path']), '/');
+            $normUrl  = strtolower(rtrim($cand['url'], '/'));
+            if (isset($existingPaths[$normPath]) || isset($existingUrls[$normUrl])) {
+                continue;
+            }
+
+            $stack = 'PHP Native';
+            if (is_dir($cand['repo_path'] . '/application/controllers') || is_dir($cand['repo_path'] . '/system/core')) {
+                $stack = 'CodeIgniter 3/4';
+            } elseif (is_file($cand['repo_path'] . '/artisan')) {
+                $stack = 'Laravel';
+            } elseif (is_file($cand['repo_path'] . '/wp-config.php')) {
+                $stack = 'WordPress';
+            }
+
+            $branch = 'main';
+            if (is_dir($cand['repo_path'] . '/.git')) {
+                $b = $this->runLocalProcess('git rev-parse --abbrev-ref HEAD', $cand['repo_path']);
+                if ($b['exit_code'] === 0 && $b['output'] !== '') {
+                    $branch = trim($b['output']);
+                }
+            }
+
+            $newId = $this->addSite([
+                'name'          => $cand['name'],
+                'url'           => $cand['url'],
+                'stack_type'    => $stack,
+                'hosting_panel' => 'cPanel Unlimited',
+                'conn_mode'     => 'local',
+                'repo_path'     => $cand['repo_path'],
+                'git_branch'    => $branch,
+            ]);
+            $this->syncSite($newId);
+            $discovered[] = $cand['name'];
+        }
+
+        return [
+            'ok'         => true,
+            'scanned_in' => $parentDir,
+            'added'      => $discovered,
+            'count'      => count($discovered),
+        ];
     }
 
     public function syncSite(int $id): array {
@@ -212,28 +321,52 @@ class SiteOperations {
         return $results;
     }
 
-    public function executeGitAction(int $id, string $action = 'git_pull'): array {
+    public function executeGitAction(int $id, string $action = 'git_pull', string $customCmd = ''): array {
         $site = $this->getSiteById($id);
         if (!$site) {
             return ['ok' => false, 'error' => 'Website tidak ditemukan.'];
         }
 
         $branch = $site['git_branch'] ?: 'main';
-        $cmdStr = $action === 'git_pull' ? "git pull origin {$branch}" : 'git status -sb';
-        $output = '';
+        $cmdStr = match ($action) {
+            'git_pull'   => "git pull origin {$branch}",
+            'git_status' => 'git status -sb',
+            'git_reset'  => "git fetch --all && git reset --hard origin/{$branch}",
+            'git_log'    => 'git log -8 --oneline --decorate --graph',
+            'custom_cmd' => $customCmd,
+            default      => "git pull origin {$branch}",
+        };
+
+        $output    = '';
         $isSuccess = false;
 
         if ($site['conn_mode'] === 'local' || $this->isLocalSelfTarget($site)) {
             $targetDir = !empty($site['repo_path']) && is_dir($site['repo_path'])
                 ? $site['repo_path']
                 : dirname(__DIR__);
-            $res = $this->runLocalProcess($cmdStr . ' 2>&1', $targetDir);
-            $output = $res['output'];
-            $isSuccess = $res['exit_code'] === 0;
+
+            if ($action === 'clean_cache') {
+                $clean = $this->cleanLocalCacheAndSessions($targetDir);
+                $cmdStr = 'clean_cache_and_sessions';
+                $output = "Berhasil menghapus {$clean['deleted_files']} file cache/session ({$clean['freed_mb']} MB dibebaskan) di {$targetDir}.";
+                $isSuccess = true;
+            } elseif ($action === 'backup_zip') {
+                $zipRes = $this->createLocalZipBackup($targetDir);
+                $cmdStr = 'backup_zip';
+                $isSuccess = $zipRes['ok'];
+                $output = $zipRes['ok']
+                    ? "Backup ZIP berhasil dibuat: {$zipRes['file_path']} ({$zipRes['files_zipped']} file, {$zipRes['size_mb']} MB)."
+                    : ($zipRes['error'] ?? 'Gagal membuat ZIP.');
+            } else {
+                $res = $this->runLocalProcess($cmdStr . ' 2>&1', $targetDir);
+                $output = $res['output'];
+                $isSuccess = $res['exit_code'] === 0;
+            }
         } elseif ($site['conn_mode'] === 'agent') {
             $resp = $this->callRemoteAgent($site, [
                 'action'    => $action,
                 'branch'    => $branch,
+                'command'   => $customCmd,
                 'repo_path' => $site['repo_path'],
             ]);
             if ($resp['ok']) {
@@ -274,14 +407,48 @@ class SiteOperations {
         ];
     }
 
+    public function executeMassGitPull(): array {
+        $sites = $this->getAllSites();
+        $logs  = [];
+        $okCount = 0;
+
+        foreach ($sites as $s) {
+            $res = $this->executeGitAction((int) $s['id'], 'git_pull');
+            if ($res['ok']) {
+                $okCount++;
+            }
+            $logs[] = "=== [{$s['name']}] ({$res['command']}) ===\n" . $res['output'];
+        }
+
+        return [
+            'ok'        => true,
+            'total'     => count($sites),
+            'succeeded' => $okCount,
+            'output'    => empty($logs) ? 'Belum ada website terdaftar.' : implode("\n\n", $logs),
+            'timestamp' => date('Y-m-d H:i:s'),
+        ];
+    }
+
     public function clearSiteErrorLogs(int $id): array {
         $site = $this->getSiteById($id);
         if (!$site) {
             return ['ok' => false, 'error' => 'Website tidak ditemukan.'];
         }
 
-        $msg = 'Log lokal di database MONWEB telah dibersihkan.';
-        if ($site['conn_mode'] === 'agent' && !empty($site['agent_url']) && !$this->isLocalSelfTarget($site)) {
+        $msg = 'Log di database MONWEB dan file error_log telah dibersihkan.';
+        if ($site['conn_mode'] === 'local' || $this->isLocalSelfTarget($site)) {
+            $cwd = !empty($site['repo_path']) && is_dir($site['repo_path']) ? $site['repo_path'] : dirname(__DIR__);
+            foreach ([$cwd . '/error_log', $cwd . '/php_errorlog', $cwd . '/storage/logs/laravel.log'] as $f) {
+                if (is_file($f) && is_writable($f)) {
+                    @file_put_contents($f, '');
+                }
+            }
+            foreach (glob($cwd . '/application/logs/log-*.php') ?: [] as $cf) {
+                if (is_writable($cf)) {
+                    @unlink($cf);
+                }
+            }
+        } elseif ($site['conn_mode'] === 'agent' && !empty($site['agent_url'])) {
             $resp = $this->callRemoteAgent($site, [
                 'action'    => 'clear_logs',
                 'repo_path' => $site['repo_path'],
@@ -386,7 +553,7 @@ class SiteOperations {
         }
 
         $lines[] = "--------------------------------";
-        $lines[] = "Panel Kontrol: monweb.baznassumbawa.id";
+        $lines[] = "Panel Kontrol: https://monweb.baznassumbawa.id";
 
         return implode("\n", $lines);
     }
@@ -446,6 +613,98 @@ class SiteOperations {
         ];
     }
 
+    private function cleanLocalCacheAndSessions(string $cwd): array {
+        $dirs = [
+            $cwd . '/application/cache',
+            $cwd . '/writable/cache',
+            $cwd . '/writable/session',
+            $cwd . '/writable/debugbar',
+            $cwd . '/storage/framework/cache/data',
+            $cwd . '/storage/framework/views',
+        ];
+        $deletedFiles = 0;
+        $freedBytes   = 0;
+
+        foreach ($dirs as $d) {
+            if (!is_dir($d)) {
+                continue;
+            }
+            try {
+                $it = new \RecursiveIteratorIterator(
+                    new \RecursiveDirectoryIterator($d, \FilesystemIterator::SKIP_DOTS),
+                    \RecursiveIteratorIterator::CHILD_FIRST
+                );
+                foreach ($it as $f) {
+                    $name = $f->getFilename();
+                    if ($name === 'index.html' || $name === '.htaccess' || $name === '.gitignore') {
+                        continue;
+                    }
+                    if ($f->isFile() && is_writable($f->getPathname())) {
+                        $freedBytes += (int) $f->getSize();
+                        if (@unlink($f->getPathname())) {
+                            $deletedFiles++;
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+            }
+        }
+
+        return [
+            'deleted_files' => $deletedFiles,
+            'freed_mb'      => round($freedBytes / 1048576, 2),
+        ];
+    }
+
+    private function createLocalZipBackup(string $cwd): array {
+        if (!class_exists('ZipArchive')) {
+            return ['ok' => false, 'error' => 'Ekstensi ZipArchive tidak tersedia di PHP ini.'];
+        }
+        $storageDir = dirname(__DIR__) . '/storage/backups';
+        if (!is_dir($storageDir)) {
+            @mkdir($storageDir, 0755, true);
+        }
+        $backupName = 'backup_' . basename($cwd) . '_' . date('Ymd_His') . '.zip';
+        $backupPath = $storageDir . '/' . $backupName;
+
+        $zip = new ZipArchive();
+        if ($zip->open($backupPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            return ['ok' => false, 'error' => 'Gagal membuka file arsip ZIP untuk penulisan.'];
+        }
+
+        $count = 0;
+        try {
+            $it = new \RecursiveIteratorIterator(
+                new \RecursiveDirectoryIterator($cwd, \FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($it as $file) {
+                if (!$file->isFile()) {
+                    continue;
+                }
+                $real = $file->getRealPath();
+                $rel  = substr($real, strlen($cwd) + 1);
+                if (str_starts_with($rel, '.git') || str_ends_with($rel, '.zip') || str_ends_with($rel, '.sqlite')) {
+                    continue;
+                }
+                $zip->addFile($real, $rel);
+                $count++;
+                if ($count >= 6000) {
+                    break;
+                }
+            }
+        } catch (Throwable $e) {
+        }
+        $zip->close();
+
+        return [
+            'ok'           => true,
+            'file_name'    => $backupName,
+            'file_path'    => 'storage/backups/' . $backupName,
+            'files_zipped' => $count,
+            'size_mb'      => is_file($backupPath) ? round(filesize($backupPath) / 1048576, 2) : 0,
+        ];
+    }
+
     private function isLocalSelfTarget(array $site): bool {
         $path = trim((string) ($site['repo_path'] ?? ''));
         return $path !== '' && is_dir($path) && empty($site['ssh_host']);
@@ -466,7 +725,7 @@ class SiteOperations {
                 if ($file->isFile()) {
                     $projectBytes += $file->getSize();
                 }
-                if ($inodes >= 10000) {
+                if ($inodes >= 12000) {
                     break;
                 }
             }
@@ -475,7 +734,7 @@ class SiteOperations {
 
         $branch = 'main';
         $commitHash = '-';
-        $commitMsg = 'Workspace lokal aktif';
+        $commitMsg = 'Folder terhubung (tanpa .git)';
         $dirtyFiles = 0;
 
         if (is_dir($cwd . '/.git')) {
@@ -496,11 +755,32 @@ class SiteOperations {
         }
 
         $errors = [];
-        $errFile = $cwd . '/error_log';
-        if (is_file($errFile)) {
-            $lines = array_slice(file($errFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [], -30);
-            foreach ($lines as $ln) {
-                $errors[] = ['source' => 'error_log', 'line' => $ln];
+        $errCandidates = [
+            $cwd . '/error_log',
+            $cwd . '/php_errorlog',
+            $cwd . '/storage/logs/laravel.log',
+        ];
+        foreach ($errCandidates as $errFile) {
+            if (is_file($errFile) && is_readable($errFile)) {
+                $lines = array_slice(file($errFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [], -30);
+                foreach ($lines as $ln) {
+                    $errors[] = ['source' => basename($errFile), 'line' => $ln];
+                }
+            }
+        }
+
+        $ciLogDir = $cwd . '/application/logs';
+        if (is_dir($ciLogDir) && is_readable($ciLogDir)) {
+            $ciFiles = glob($ciLogDir . '/log-*.php') ?: [];
+            rsort($ciFiles);
+            foreach (array_slice($ciFiles, 0, 2) as $cf) {
+                $lines = array_slice(file($cf, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [], -25);
+                foreach ($lines as $ln) {
+                    if (str_starts_with(trim($ln), '<?php')) {
+                        continue;
+                    }
+                    $errors[] = ['source' => 'application/logs/' . basename($cf), 'line' => $ln];
+                }
             }
         }
 
@@ -567,7 +847,7 @@ class SiteOperations {
             CURLOPT_TIMEOUT        => 6,
             CURLOPT_CONNECTTIMEOUT => 4,
             CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_USERAGENT      => 'MONWEB-By-AP-Monitor/1.0 (ALBIANDRA PROJECT)',
+            CURLOPT_USERAGENT      => 'MONWEB-By-AP-Monitor/2.0 (ALBIANDRA PROJECT)',
         ]);
 
         @curl_exec($ch);
@@ -612,7 +892,7 @@ class SiteOperations {
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $body,
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 12,
+            CURLOPT_TIMEOUT        => 15,
             CURLOPT_SSL_VERIFYPEER => false,
             CURLOPT_HTTPHEADER     => [
                 'Content-Type: application/json',
@@ -705,4 +985,3 @@ class SiteOperations {
         ];
     }
 }
-

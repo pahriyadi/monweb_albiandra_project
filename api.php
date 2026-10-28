@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+session_start();
+
 require_once __DIR__ . '/app/Database.php';
 require_once __DIR__ . '/app/SiteOperations.php';
 
@@ -34,6 +36,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $action = (string) ($req['action'] ?? '');
 
+    if ($action === 'verify_pin') {
+        $inputPin = trim((string) ($req['pin_code'] ?? ''));
+        $savedPin = Database::getSetting('security_pin_code', '123456');
+        if ($inputPin !== '' && hash_equals($savedPin, $inputPin)) {
+            $_SESSION['monweb_unlocked'] = true;
+            echo json_encode(['ok' => true, 'message' => 'Akses konsol dibuka.']);
+        } else {
+            http_response_code(403);
+            echo json_encode(['ok' => false, 'error' => 'Kode PIN Keamanan tidak sesuai.']);
+        }
+        exit;
+    }
+
+    if ($action === 'lock_session') {
+        unset($_SESSION['monweb_unlocked']);
+        echo json_encode(['ok' => true]);
+        exit;
+    }
+
+    $pinEnabled = Database::getSetting('security_pin_enabled', '0') === '1';
+    if ($pinEnabled && empty($_SESSION['monweb_unlocked'])) {
+        http_response_code(401);
+        echo json_encode(['ok' => false, 'error' => 'Sesi terkunci. Masukkan PIN Keamanan terlebih dahulu.']);
+        exit;
+    }
+
     try {
         switch ($action) {
             case 'add_site':
@@ -44,6 +72,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'message' => 'Website berhasil ditambahkan dan disinkronkan.',
                     'site'    => $sync['site'] ?? $ops->getSiteById($newId),
                 ]);
+                break;
+
+            case 'auto_discover':
+                $res = $ops->discoverLocalHostingDirectories();
+                echo json_encode($res);
                 break;
 
             case 'delete_site':
@@ -68,9 +101,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'git_action':
-                $id      = (int) ($req['id'] ?? 0);
-                $gitType = (string) ($req['git_type'] ?? 'git_pull');
-                $res     = $ops->executeGitAction($id, $gitType);
+                $id        = (int) ($req['id'] ?? 0);
+                $gitType   = (string) ($req['git_type'] ?? 'git_pull');
+                $customCmd = (string) ($req['custom_cmd'] ?? '');
+                $res       = $ops->executeGitAction($id, $gitType, $customCmd);
+                echo json_encode($res);
+                break;
+
+            case 'mass_git_pull':
+                $res = $ops->executeMassGitPull();
                 echo json_encode($res);
                 break;
 
@@ -81,15 +120,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 break;
 
             case 'save_settings':
-                $fields = ['wa_recipient', 'wa_schedule_time', 'wa_timezone', 'wa_auto_trigger', 'wa_webhook_url', 'wa_webhook_token'];
+                $fields = [
+                    'wa_recipient',
+                    'wa_schedule_time',
+                    'wa_timezone',
+                    'wa_auto_trigger',
+                    'wa_webhook_url',
+                    'wa_webhook_token',
+                    'security_pin_enabled',
+                    'security_pin_code',
+                ];
                 foreach ($fields as $f) {
                     if (isset($req[$f])) {
                         Database::setSetting($f, trim((string) $req[$f]));
                     }
                 }
+                if (($req['security_pin_enabled'] ?? '0') === '1') {
+                    $_SESSION['monweb_unlocked'] = true;
+                }
                 echo json_encode([
                     'ok'       => true,
-                    'message'  => 'Konfigurasi jadwal laporan WhatsApp 08:00 pagi berhasil disimpan.',
+                    'message'  => 'Konfigurasi sistem dan jadwal otomatisasi berhasil disimpan.',
                     'settings' => Database::getAllSettings(),
                 ]);
                 break;
@@ -115,4 +166,3 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 http_response_code(405);
 header('Content-Type: application/json; charset=utf-8');
 echo json_encode(['ok' => false, 'error' => 'Gunakan metode POST atau parameter download_agent=1.']);
-
