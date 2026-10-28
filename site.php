@@ -373,3 +373,4 @@ $findings   = $inspection['findings'] ?? [];
     </script>
 </body>
 </html>
+

@@ -522,3 +522,4 @@ class LocalInspector
         return $code === 0 ? trim($out) : '';
     }
 }
+
