@@ -1,0 +1,7 @@
+Options -Indexes
+
+<FilesMatch "^(\.env\.php|monweb\.sqlite)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+

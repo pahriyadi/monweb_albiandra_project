@@ -1,0 +1,7 @@
+/storage/*.sqlite
+/storage/*.sqlite-shm
+/storage/*.sqlite-wal
+.env.php
+.monweb_traffic.json
+error_log
+php_errorlog
