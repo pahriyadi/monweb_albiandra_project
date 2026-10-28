@@ -514,6 +514,102 @@ class SiteOperations {
         return $stmt->fetchAll();
     }
 
+    public function inspectSiteSection(int $id, string $section = 'all'): array {
+        $site = $this->getSiteById($id);
+        if (!$site) {
+            return ['ok' => false, 'error' => 'Website tidak ditemukan.'];
+        }
+
+        $url = (string) $site['url'];
+        $path = trim((string) ($site['repo_path'] ?? ''));
+        if (($site['conn_mode'] === 'local' || $this->isLocalSelfTarget($site)) && ($path === '' || !is_dir($path))) {
+            $path = dirname(__DIR__);
+        }
+
+        $data = [];
+
+        if ($section === 'all' || $section === 'http' || $section === 'headers') {
+            $http = RemoteProbe::http($url);
+            $data['http'] = $http;
+            $data['headers'] = $http;
+        }
+        if ($section === 'all' || $section === 'ssl') {
+            $data['ssl'] = RemoteProbe::ssl($url);
+        }
+        if ($section === 'all' || $section === 'dns') {
+            $data['dns'] = RemoteProbe::dns($url);
+        }
+        if ($section === 'all' || $section === 'links') {
+            $data['links'] = LocalInspector::checkLinks($url);
+        }
+
+        $needWorkspace = in_array($section, ['all', 'disk', 'git', 'framework', 'errors'], true);
+        if ($needWorkspace) {
+            if ($site['conn_mode'] === 'local' || $this->isLocalSelfTarget($site)) {
+                if ($section === 'all' || $section === 'disk') {
+                    $data['disk'] = LocalInspector::diskTree($path);
+                }
+                if ($section === 'all' || $section === 'git') {
+                    $data['git'] = LocalInspector::gitDeep($path);
+                }
+                if ($section === 'all' || $section === 'framework') {
+                    $data['framework'] = LocalInspector::frameworkInfo($path);
+                }
+                if ($section === 'all' || $section === 'errors') {
+                    $data['errors'] = LocalInspector::errorAnalytics($path);
+                }
+            } elseif ($site['conn_mode'] === 'agent' && !empty($site['agent_url'])) {
+                $resp = $this->callRemoteAgent($site, [
+                    'action'    => 'deep_inspect',
+                    'section'   => $section,
+                    'repo_path' => $site['repo_path'],
+                ]);
+                if ($resp['ok']) {
+                    $d = $resp['data'];
+                    $data['disk']      = $d['disk'] ?? ['available' => false, 'note' => 'Data disk belum tersedia dari agent.'];
+                    $data['git']       = $d['git'] ?? ['available' => false, 'note' => 'Data git belum tersedia dari agent.'];
+                    $data['framework'] = $d['framework'] ?? ['available' => false, 'note' => 'Data framework belum tersedia dari agent.'];
+                    $data['errors']    = $d['errors'] ?? ['available' => false, 'note' => 'Data error belum tersedia dari agent.'];
+                } else {
+                    $errNote = $resp['error'] ?? 'Agent belum merespons.';
+                    $data['disk']      = ['available' => false, 'note' => $errNote];
+                    $data['git']       = ['available' => false, 'note' => $errNote];
+                    $data['framework'] = ['available' => false, 'note' => $errNote];
+                    $data['errors']    = ['available' => false, 'note' => $errNote];
+                }
+            } else {
+                $note = 'Hubungkan folder proyek lokal atau pasang monweb-agent.php untuk membaca detail dalam folder.';
+                $data['disk']      = ['available' => false, 'note' => $note];
+                $data['git']       = ['available' => false, 'note' => $note];
+                $data['framework'] = ['available' => false, 'note' => $note];
+                $data['errors']    = ['available' => false, 'note' => $note];
+            }
+        }
+
+        if ($section !== 'all') {
+            return [
+                'ok'      => true,
+                'section' => $section,
+                'html'    => ProbeView::render($section, $data[$section] ?? []),
+            ];
+        }
+
+        return [
+            'ok'       => true,
+            'site'     => $site,
+            'data'     => $data,
+            'findings' => ProbeView::findings(
+                $data['http'] ?? [],
+                $data['ssl'] ?? [],
+                $data['dns'] ?? [],
+                $data['disk'] ?? [],
+                $data['git'] ?? [],
+                $data['errors'] ?? [],
+                $data['links'] ?? []
+            ),
+        ];
+    }
+
     public function buildDailyWhatsAppReport(): string {
         $sites = $this->getAllSites();
         $total = count($sites);

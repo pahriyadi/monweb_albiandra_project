@@ -4,6 +4,9 @@ declare(strict_types=1);
 session_start();
 
 require_once __DIR__ . '/app/Database.php';
+require_once __DIR__ . '/app/RemoteProbe.php';
+require_once __DIR__ . '/app/LocalInspector.php';
+require_once __DIR__ . '/app/ProbeView.php';
 require_once __DIR__ . '/app/SiteOperations.php';
 
 use MonWeb\Database;
@@ -116,6 +119,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'clear_logs':
                 $id  = (int) ($req['id'] ?? 0);
                 $res = $ops->clearSiteErrorLogs($id);
+                echo json_encode($res);
+                break;
+
+            case 'inspect_section':
+                $id      = (int) ($req['id'] ?? 0);
+                $section = (string) ($req['section'] ?? 'http');
+                $res     = $ops->inspectSiteSection($id, $section);
                 echo json_encode($res);
                 break;
 

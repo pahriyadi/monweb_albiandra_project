@@ -284,6 +284,9 @@ $waDirectLink = 'https://wa.me/' . $waIntl . '?text=' . rawurlencode($waPreview)
                                 </div>
 
                                 <div class="site-actions">
+                                    <a href="site.php?id=<?= (int) $site['id'] ?>" class="btn btn-sm">
+                                        <span>Detail &amp; Akar</span>
+                                    </a>
                                     <button type="button" class="btn btn-primary btn-sm js-git-action"
                                         data-id="<?= (int) $site['id'] ?>" data-git="git_pull"
                                         data-name="<?= htmlspecialchars($site['name']) ?>">

@@ -358,7 +358,328 @@ function getTrafficStats(string $cwd): array {
     ];
 }
 
+function collectDeepDisk(string $cwd): array {
+    $real = realpath($cwd) ?: $cwd;
+    $totalBytes = 0;
+    $totalFiles = 0;
+    $totalDirs  = 0;
+    $topFolders = [];
+    $largestFiles = [];
+    $extBreakdown = [];
+    $recentFiles  = [];
+    $sevenDaysAgo = time() - (7 * 86400);
+    $maxScan = 15000;
+
+    try {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($real, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($it as $item) {
+            $full = $item->getPathname();
+            $rel  = ltrim(str_replace('\\', '/', substr($full, strlen($real))), '/');
+            if ($rel === '') {
+                continue;
+            }
+            $parts = explode('/', $rel);
+            $top   = count($parts) > 1 ? $parts[0] . '/' : '(root)';
+
+            if ($item->isDir()) {
+                $totalDirs++;
+                continue;
+            }
+            if (!$item->isFile()) {
+                continue;
+            }
+            $totalFiles++;
+            $size  = (int) @$item->getSize();
+            $mtime = (int) @$item->getMTime();
+            $totalBytes += $size;
+
+            if (!isset($topFolders[$top])) {
+                $topFolders[$top] = ['folder' => $top, 'bytes' => 0, 'files' => 0];
+            }
+            $topFolders[$top]['bytes'] += $size;
+            $topFolders[$top]['files']++;
+
+            $ext = strtolower(pathinfo($rel, PATHINFO_EXTENSION));
+            $ext = $ext === '' ? '(tanpa ekstensi)' : '.' . $ext;
+            if (!isset($extBreakdown[$ext])) {
+                $extBreakdown[$ext] = ['ext' => $ext, 'count' => 0, 'bytes' => 0];
+            }
+            $extBreakdown[$ext]['count']++;
+            $extBreakdown[$ext]['bytes'] += $size;
+
+            if (!str_starts_with($rel, '.git/')) {
+                $largestFiles[] = [
+                    'path'  => $rel,
+                    'bytes' => $size,
+                    'mtime' => $mtime > 0 ? date('Y-m-d H:i', $mtime) : '-',
+                ];
+                if ($mtime >= $sevenDaysAgo) {
+                    $recentFiles[] = [
+                        'path'  => $rel,
+                        'bytes' => $size,
+                        'mtime' => $mtime,
+                        'date'  => date('Y-m-d H:i', $mtime),
+                    ];
+                }
+            }
+            if ($totalFiles >= $maxScan) {
+                break;
+            }
+        }
+    } catch (Throwable $e) {
+    }
+
+    usort($topFolders, fn($a, $b) => $b['bytes'] <=> $a['bytes']);
+    usort($largestFiles, fn($a, $b) => $b['bytes'] <=> $a['bytes']);
+    usort($extBreakdown, fn($a, $b) => $b['bytes'] <=> $a['bytes']);
+    usort($recentFiles, fn($a, $b) => $b['mtime'] <=> $a['mtime']);
+
+    return [
+        'available'     => true,
+        'root_path'     => $real,
+        'total_bytes'   => $totalBytes,
+        'total_files'   => $totalFiles,
+        'total_dirs'    => $totalDirs,
+        'top_folders'   => array_slice(array_values($topFolders), 0, 12),
+        'largest_files' => array_slice($largestFiles, 0, 15),
+        'extensions'    => array_slice(array_values($extBreakdown), 0, 12),
+        'recent_files'  => array_slice($recentFiles, 0, 15),
+        'capped'        => $totalFiles >= $maxScan,
+    ];
+}
+
+function collectDeepGit(string $cwd): array {
+    if (!is_dir($cwd . '/.git')) {
+        return ['available' => false, 'note' => 'Folder proyek belum memiliki repositori .git.'];
+    }
+    $branch   = runCommand('git rev-parse --abbrev-ref HEAD', $cwd)['stdout'];
+    $remote   = runCommand('git config --get remote.origin.url', $cwd)['stdout'];
+    $tot      = runCommand('git rev-list --count HEAD', $cwd)['stdout'];
+    $tag      = runCommand('git describe --tags --abbrev=0', $cwd)['stdout'];
+    $branches = runCommand('git branch -a --no-color', $cwd)['stdout'];
+    $status   = runCommand('git status --porcelain', $cwd)['stdout'];
+    $logRaw   = runCommand('git log -15 --format="%h|%an|%cr|%ci|%s"', $cwd)['stdout'];
+
+    $ahead  = 0;
+    $behind = 0;
+    $ab = runCommand('git rev-list --left-right --count HEAD...@{u}', $cwd)['stdout'];
+    if ($ab !== '' && preg_match('/^(\d+)\s+(\d+)$/', $ab, $m)) {
+        $ahead  = (int) $m[1];
+        $behind = (int) $m[2];
+    }
+
+    $packBytes = 0;
+    $gitObjDir = $cwd . '/.git/objects';
+    if (is_dir($gitObjDir)) {
+        try {
+            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($gitObjDir, FilesystemIterator::SKIP_DOTS));
+            foreach ($it as $f) {
+                if ($f->isFile()) {
+                    $packBytes += (int) @$f->getSize();
+                }
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
+    $commits = [];
+    if ($logRaw !== '') {
+        foreach (explode("\n", $logRaw) as $ln) {
+            $p = explode('|', trim($ln, '"'), 5);
+            if (count($p) === 5) {
+                $commits[] = ['hash' => $p[0], 'author' => $p[1], 'rel' => $p[2], 'date' => $p[3], 'subject' => $p[4]];
+            }
+        }
+    }
+
+    return [
+        'available'     => true,
+        'branch'        => $branch !== '' ? $branch : 'main',
+        'remote_url'    => $remote !== '' ? $remote : '(belum diatur)',
+        'total_commits' => (int) $tot,
+        'latest_tag'    => $tag !== '' ? $tag : '(belum ada tag)',
+        'ahead'         => $ahead,
+        'behind'        => $behind,
+        'pack_bytes'    => $packBytes,
+        'branches'      => $branches !== '' ? array_values(array_filter(array_map('trim', explode("\n", $branches)))) : [],
+        'dirty_files'   => $status !== '' ? array_values(array_filter(array_map('trim', explode("\n", $status)))) : [],
+        'commits'       => $commits,
+    ];
+}
+
+function collectDeepFramework(string $cwd): array {
+    $framework = 'PHP Native';
+    $version   = '-';
+    $envMode   = '-';
+    $baseUrl   = '-';
+    $dbDriver  = '-';
+
+    if (is_file($cwd . '/system/core/CodeIgniter.php') || is_dir($cwd . '/application/controllers')) {
+        $framework = 'CodeIgniter 3';
+        $ciCore = $cwd . '/system/core/CodeIgniter.php';
+        if (is_file($ciCore) && is_readable($ciCore)) {
+            $raw = (string) @file_get_contents($ciCore);
+            if (preg_match("/CI_VERSION['\"]\s*,\s*['\"]([^'\"]+)['\"]/", $raw, $m)) {
+                $version = $m[1];
+            }
+        }
+        $idxFile = $cwd . '/index.php';
+        if (is_file($idxFile) && is_readable($idxFile)) {
+            $raw = (string) @file_get_contents($idxFile);
+            if (preg_match("/define\(\s*['\"]ENVIRONMENT['\"]\s*,[^'\"]*['\"]([^'\"]+)['\"]/", $raw, $m)) {
+                $envMode = $m[1];
+            }
+        }
+        $cfgFile = $cwd . '/application/config/config.php';
+        if (is_file($cfgFile) && is_readable($cfgFile)) {
+            $raw = (string) @file_get_contents($cfgFile);
+            if (preg_match('/\$config\[[\'"]base_url[\'"]\]\s*=\s*[\'"]([^\'"]+)[\'"]/', $raw, $m)) {
+                $baseUrl = $m[1];
+            }
+        }
+        $dbFile = $cwd . '/application/config/database.php';
+        if (is_file($dbFile) && is_readable($dbFile)) {
+            $raw = (string) @file_get_contents($dbFile);
+            if (preg_match('/[\'"]dbdriver[\'"]\s*=>\s*[\'"]([^\'"]+)[\'"]/', $raw, $m)) {
+                $dbDriver = $m[1];
+            }
+        }
+    } elseif (is_file($cwd . '/spark') || is_dir($cwd . '/app/Config')) {
+        $framework = 'CodeIgniter 4';
+        $envMode   = is_file($cwd . '/.env') ? 'Dikonfigurasi via .env' : 'production';
+    } elseif (is_file($cwd . '/artisan')) {
+        $framework = 'Laravel';
+        $envMode   = is_file($cwd . '/.env') ? 'Dikonfigurasi via .env' : 'production';
+    } elseif (is_file($cwd . '/wp-includes/version.php')) {
+        $framework = 'WordPress';
+        $raw = (string) @file_get_contents($cwd . '/wp-includes/version.php');
+        if (preg_match('/\$wp_version\s*=\s*[\'"]([^\'"]+)[\'"]/', $raw, $m)) {
+            $version = $m[1];
+        }
+    }
+
+    $composerPackages = [];
+    $compFile = $cwd . '/composer.json';
+    if (is_file($compFile) && is_readable($compFile)) {
+        $comp = json_decode((string) @file_get_contents($compFile), true);
+        if (is_array($comp) && !empty($comp['require']) && is_array($comp['require'])) {
+            foreach ($comp['require'] as $pkg => $ver) {
+                $composerPackages[] = $pkg . ': ' . $ver;
+            }
+        }
+    }
+
+    $htaccessLines = [];
+    $htFile = $cwd . '/.htaccess';
+    if (is_file($htFile) && is_readable($htFile)) {
+        $lines = file($htFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        $htaccessLines = array_slice($lines, 0, 25);
+    }
+
+    $importantExts = ['curl', 'mbstring', 'openssl', 'pdo_mysql', 'pdo_sqlite', 'zip', 'gd', 'intl'];
+    $extStatus = [];
+    foreach ($importantExts as $ext) {
+        $extStatus[$ext] = extension_loaded($ext);
+    }
+
+    return [
+        'available'         => true,
+        'framework'         => $framework,
+        'framework_version' => $version,
+        'environment'       => $envMode,
+        'base_url'          => $baseUrl,
+        'db_driver'         => $dbDriver,
+        'php_version'       => PHP_VERSION,
+        'php_sapi'          => PHP_SAPI,
+        'memory_limit'      => (string) ini_get('memory_limit'),
+        'upload_max'        => (string) ini_get('upload_max_filesize'),
+        'post_max'          => (string) ini_get('post_max_size'),
+        'max_exec_time'     => (string) ini_get('max_execution_time') . ' detik',
+        'composer_packages' => $composerPackages,
+        'htaccess_preview'  => $htaccessLines,
+        'extensions'        => $extStatus,
+    ];
+}
+
+function collectDeepErrors(string $cwd): array {
+    $files = [];
+    foreach ([$cwd . '/error_log', $cwd . '/php_errorlog', $cwd . '/storage/logs/laravel.log'] as $f) {
+        if (is_file($f) && is_readable($f)) {
+            $files[] = $f;
+        }
+    }
+    foreach (glob($cwd . '/application/logs/log-*.php') ?: [] as $cf) {
+        if (is_readable($cf)) {
+            $files[] = $cf;
+        }
+    }
+
+    $groups = [];
+    $totalLines = 0;
+
+    foreach ($files as $file) {
+        $lines = tailFileLines($file, 200);
+        foreach ($lines as $line) {
+            $trim = trim($line);
+            if ($trim === '' || str_starts_with($trim, '<?php')) {
+                continue;
+            }
+            $totalLines++;
+            $clean = preg_replace('/^\[[^\]]+\]\s*/', '', $trim);
+            $clean = preg_replace('/^(ERROR|WARNING|NOTICE|DEBUG)\s*-\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s*-->\s*/i', '', (string) $clean);
+            $key   = md5((string) $clean);
+
+            $sev = 'NOTICE';
+            if (stripos($trim, 'fatal') !== false || stripos($trim, 'exception') !== false || stripos($trim, 'error') !== false) {
+                $sev = 'ERROR';
+            } elseif (stripos($trim, 'warn') !== false) {
+                $sev = 'WARNING';
+            }
+
+            $loc = '-';
+            if (preg_match('#in\s+([^\s:]+\.php)(?:\s+on\s+line\s+|\:)(\d+)#i', (string) $clean, $m)) {
+                $loc = basename($m[1]) . ':' . $m[2];
+            }
+
+            if (!isset($groups[$key])) {
+                $groups[$key] = [
+                    'severity' => $sev,
+                    'message'  => substr((string) $clean, 0, 260),
+                    'location' => $loc,
+                    'source'   => basename($file),
+                    'count'    => 0,
+                ];
+            }
+            $groups[$key]['count']++;
+        }
+    }
+
+    usort($groups, fn($a, $b) => $b['count'] <=> $a['count']);
+
+    return [
+        'available'   => true,
+        'log_files'   => array_map('basename', $files),
+        'total_lines' => $totalLines,
+        'unique_bugs' => count($groups),
+        'items'       => array_slice(array_values($groups), 0, 20),
+    ];
+}
+
 switch ($action) {
+    case 'deep_inspect':
+        $section = (string) ($payload['section'] ?? 'all');
+        echo json_encode([
+            'ok'        => true,
+            'disk'      => ($section === 'all' || $section === 'disk') ? collectDeepDisk($targetPath) : [],
+            'git'       => ($section === 'all' || $section === 'git') ? collectDeepGit($targetPath) : [],
+            'framework' => ($section === 'all' || $section === 'framework') ? collectDeepFramework($targetPath) : [],
+            'errors'    => ($section === 'all' || $section === 'errors') ? collectDeepErrors($targetPath) : [],
+        ]);
+        break;
+
     case 'telemetry':
         echo json_encode([
             'ok'          => true,
