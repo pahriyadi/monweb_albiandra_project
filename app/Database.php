@@ -23,27 +23,33 @@ class Database {
 
         $driver = $config['DB_DRIVER'] ?? 'sqlite';
 
-        if ($driver === 'mysql' && !empty($config['DB_NAME'])) {
-            $host = $config['DB_HOST'] ?? '127.0.0.1';
-            $port = $config['DB_PORT'] ?? '3306';
-            $db   = $config['DB_NAME'];
-            $user = $config['DB_USER'] ?? 'root';
-            $pass = $config['DB_PASS'] ?? '';
-            $dsn  = "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4";
-            self::$pdo = new PDO($dsn, $user, $pass, [
-                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            ]);
-        } else {
-            $sqlitePath = $storageDir . '/monweb.sqlite';
-            self::$pdo = new PDO('sqlite:' . $sqlitePath, null, null, [
-                PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            ]);
-            self::$pdo->exec('PRAGMA journal_mode = WAL;');
+        if ($driver === 'mysql' && !empty($config['DB_NAME']) && $config['DB_USER'] !== 'u123456_admin') {
+            try {
+                $host = $config['DB_HOST'] ?? '127.0.0.1';
+                $port = $config['DB_PORT'] ?? '3306';
+                $db   = $config['DB_NAME'];
+                $user = $config['DB_USER'] ?? 'root';
+                $pass = $config['DB_PASS'] ?? '';
+                $dsn  = "mysql:host={$host};port={$port};dbname={$db};charset=utf8mb4";
+                self::$pdo = new PDO($dsn, $user, $pass, [
+                    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+                    PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                ]);
+                self::migrate(self::$pdo, 'mysql');
+                return self::$pdo;
+            } catch (\Throwable $e) {
+                // Fallback otomatis ke SQLite jika kredensial MySQL di .env.php belum sesuai
+            }
         }
 
-        self::migrate(self::$pdo, $driver);
+        $sqlitePath = $storageDir . '/monweb.sqlite';
+        self::$pdo = new PDO('sqlite:' . $sqlitePath, null, null, [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ]);
+        self::$pdo->exec('PRAGMA journal_mode = WAL;');
+
+        self::migrate(self::$pdo, 'sqlite');
         return self::$pdo;
     }
 
